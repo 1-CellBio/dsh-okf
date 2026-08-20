@@ -1,0 +1,91 @@
+{
+  "name": "dsh-okf",
+  "description": "DeepSeek Harness plugin: ingest PDFs into a citable OKF library, then search and write surveys in the same conversation",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rm -rf lib && tsdown --config tsdown.config.ts",
+    "prepare": "rm -rf lib && tsdown --config tsdown.config.ts",
+    "postinstall": "node scripts/link-host-packages.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "dependencies": {
+    "@firecrawl/anydoc": "^0.1.9",
+    "@napi-rs/canvas": "^1.0.6",
+    "clsx": "^2.1.1",
+    "cytoscape": "^3.34.1",
+    "minisearch": "^7.2.0",
+    "pdfjs-dist": "^6.2.108",
+    "sql.js": "^1.14.1",
+    "tailwind-merge": "^3.6.0",
+    "yaml": "^2.9.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=0.1.0-rc.5 || >=4.0.0-rc.0",
+    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-agent-default-model": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-attachment": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-jobs": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-settings": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.5",
+    "@deepseek-ai/schemastery": ">=3.18.0",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-agent-default-model": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-attachment": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-jobs": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "lightningcss": "^1.33.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.2"
+  }
+}

@@ -1,0 +1,12 @@
+# OKF library plugin. Default library is ${cwd}/OKF in the session
+# workspace (${cwd} / ${workspace} = that folder, not the dsh launch directory).
+# Nested defaults: sources/pdfs and manuscripts. Override with OKF_DIR /
+# OKF_PDF_DIR / OKF_EXPORT_DIR, okf_set_paths, or a profile patch.
+# Never ship a machine-specific absolute path in this file.
+- insert:
+    - id: okf
+      name: dsh-okf
+      config:
+        okfDir: !!js process.env.OKF_DIR || '${cwd}/OKF'
+        pdfDir: !!js process.env.OKF_PDF_DIR || '${okfDir}/sources/pdfs'
+        exportDir: !!js process.env.OKF_EXPORT_DIR || '${okfDir}/manuscripts'
