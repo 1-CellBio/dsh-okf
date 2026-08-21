@@ -8,6 +8,8 @@ DeepSeek Harness 插件：把科研 PDF 收录进**可引用的 OKF Markdown 文
 >
 > 模型选择**完全由 Harness 控制**，OKF 没有自己的 API key、base URL 或模型配置项。
 
+![OKF 文库知识图谱界面](./OKF_main.png)
+
 ## 功能特性
 
 - **PDF 收录** — `okf_ingest` 复制 PDF、提取文本（anydoc + pdfjs 兜底）并编译原生数字论文；真扫描件会栅格化后交给 Harness 多模态模型识读。

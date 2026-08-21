@@ -8,6 +8,8 @@ DeepSeek Harness plugin: ingest research PDFs into a **citable OKF markdown libr
 >
 > Model selection is **entirely Harness-controlled**. There is no OKF API key, base URL, or model field.
 
+![OKF library knowledge graph UI](./OKF_main.png)
+
 ## Features
 
 - **PDF ingestion** — `okf_ingest` copies PDFs, extracts text (anydoc + pdfjs fallback), and compiles born-digital papers; true scans are rasterized and read via the harness multimodal model.
