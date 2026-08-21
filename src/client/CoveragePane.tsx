@@ -65,18 +65,20 @@ export function CoveragePane({ snapshot, loading, t }: CoveragePaneProps) {
         <p className={css.empty}>{t("coverage.empty")}</p>
       )}
       {gaps.length > 0 ? (
-        <ul className={css.gapList}>
-          {gaps.slice(0, GAP_SHOWN).map((gap) => (
-            <li key={gap.id} className={css.gap}>
-              <span className={css.status}>{gap.kind}</span>
-              <span>{gap.title}</span>
-              {gap.year ? <span className={css.muted}>{gap.year}</span> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {gaps.length > GAP_SHOWN ? (
-        <p className={css.more}>{fill(t("coverage.moreGaps"), gaps.length - GAP_SHOWN)}</p>
+        <details className={css.gapDetails}>
+          <summary>{t("coverage.gapList")} · {gaps.length}</summary>
+          <ul className={css.gapList}>
+            {gaps.slice(0, GAP_SHOWN).map((gap) => (
+              <li key={gap.id} className={css.gap}>
+                <span className={css.status}>{gap.kind}</span>
+                <span>{gap.title}</span>
+              </li>
+            ))}
+          </ul>
+          {gaps.length > GAP_SHOWN ? (
+            <p className={css.more}>{fill(t("coverage.moreGaps"), gaps.length - GAP_SHOWN)}</p>
+          ) : null}
+        </details>
       ) : null}
     </section>
   );

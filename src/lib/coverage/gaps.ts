@@ -41,18 +41,21 @@ export function listCoverageGaps(matrix: CoverageMatrix): CoverageGap[] {
     if (!singleTopic && !hasPapers) {
       continue;
     }
-    for (const year of topic.missingYears) {
-      gaps.push({
-        id: `missing_year:${topic.id}:${year}`,
-        kind: "missing_year",
-        title: `${topicLabel(topic)} has no papers in ${year}`,
-        detail: `This local bundle has no Paper linked to ${topic.id} with published in ${year}.`,
-        topicId: topic.id,
-        topicTitle: topic.title,
-        year,
-      });
-    }
+    // Library-wide view: empty heatmap cells already show year holes.
+    // Listing topic × year as gaps explodes (every topic missing 2024 or 2025).
+    // Keep missing_year only when the user scoped coverage to one topic.
     if (singleTopic) {
+      for (const year of topic.missingYears) {
+        gaps.push({
+          id: `missing_year:${topic.id}:${year}`,
+          kind: "missing_year",
+          title: `${topicLabel(topic)} · ${year}`,
+          detail: `This local bundle has no Paper linked to ${topic.id} with published in ${year}.`,
+          topicId: topic.id,
+          topicTitle: topic.title,
+          year,
+        });
+      }
       for (const spec of HUB_SPECS) {
         for (const hub of spec.missing(topic)) {
           gaps.push({
