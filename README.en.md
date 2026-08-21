@@ -160,7 +160,7 @@ Shipped now:
 
 Restart `dsh web` after changing `dsh.client`; the client scan caches a negative verdict until restart.
 
-The graph is SVG with a type-column layout (Paper → Topic → Method → Entity → Claim). It does not import the Vite workbench or cytoscape.
+Graph rendering: chat-card mini graphs are SVG with a type-column layout (Paper → Topic → Method → Entity → Claim); the full graph page uses WebGL (sigma.js + graphology, ForceAtlas2 layout, background Web Worker computation for ≥2000 nodes), staying smooth with tens of thousands of nodes. It does not import the Vite workbench or cytoscape.
 
 Client styling uses CSS Modules and `--dsw-*` tokens. React 18 is a platform module (external); this package does not bundle React or first-party UI internals.
 

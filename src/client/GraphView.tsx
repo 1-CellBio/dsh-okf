@@ -12,6 +12,7 @@ import type { OkfLocaleKey } from "./locales.ts";
 import type { CoverageSnapshot, OrganizeSnapshot } from "./organize-model.ts";
 import { fetchOkfJson } from "./session-fetch.ts";
 import { useVirtualRows } from "./useVirtualRows.ts";
+import { GRAPH_DEFAULT_MAX_NODES } from "@/lib/graph/scale.ts";
 import css from "./GraphView.module.css";
 
 type ProcessKind = "ok" | "failed" | "running" | "imported";
@@ -81,8 +82,8 @@ export function GraphView(props: GraphViewProps) {
   const [paperTo, setPaperTo] = useState("");
   const [graphQueryInput, setGraphQueryInput] = useState("");
   const [graphQuery, setGraphQuery] = useState("");
-  const [maxNodesInput, setMaxNodesInput] = useState("180");
-  const [maxNodes, setMaxNodes] = useState(180);
+  const [maxNodesInput, setMaxNodesInput] = useState(String(GRAPH_DEFAULT_MAX_NODES));
+  const [maxNodes, setMaxNodes] = useState(GRAPH_DEFAULT_MAX_NODES);
   const [yearFromInput, setYearFromInput] = useState("");
   const [yearToInput, setYearToInput] = useState("");
   const [yearFrom, setYearFromApplied] = useState("");
@@ -95,13 +96,13 @@ export function GraphView(props: GraphViewProps) {
     return () => window.clearTimeout(timer);
   }, [graphQueryInput]);
 
-  // Debounce the node-cap input: empty falls back to the server default (180),
-  // 0 means no cap (draw every node), any other number is passed through.
+  // Debounce the node-cap input: empty falls back to GRAPH_DEFAULT_MAX_NODES
+  // (8000, sized for a 1000-paper overview). 0 uses the server hard cap (20k).
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const raw = maxNodesInput.trim();
       if (raw === "") {
-        setMaxNodes(180);
+        setMaxNodes(GRAPH_DEFAULT_MAX_NODES);
         return;
       }
       const parsed = Number(raw);
@@ -139,7 +140,7 @@ export function GraphView(props: GraphViewProps) {
       query.claims = "1";
       query.minDegree = String(minDegree);
     }
-    if (maxNodes !== 180) {
+    if (maxNodes !== GRAPH_DEFAULT_MAX_NODES) {
       query.maxNodes = String(maxNodes);
     }
     void (async () => {
@@ -480,7 +481,7 @@ export function GraphView(props: GraphViewProps) {
                     min={0}
                     step={20}
                     value={maxNodesInput}
-                    placeholder="180"
+                    placeholder={String(GRAPH_DEFAULT_MAX_NODES)}
                     onChange={(event) => setMaxNodesInput(event.target.value)}
                   />
                 </label>
@@ -541,6 +542,7 @@ export function GraphView(props: GraphViewProps) {
                     emptyLabel={t("graph.empty")}
                     fitLabel={t("library.zoomFit")}
                     relayoutLabel={t("graph.relayout")}
+                    t={t}
                     onSelect={(id) => {
                       setSelectedId(id);
                       setTrail([]);
@@ -551,7 +553,13 @@ export function GraphView(props: GraphViewProps) {
             </div>
           </section>
         ) : pane === "review" ? (
-          <ReviewPane snapshot={organize} sessionId={sessionId} loading={loading} t={t} />
+          <ReviewPane
+            snapshot={organize}
+            sessionId={sessionId}
+            loading={loading}
+            t={t}
+            onMutated={() => setTick((n) => n + 1)}
+          />
         ) : pane === "coverage" ? (
           <CoveragePane snapshot={coverage} loading={loading} t={t} />
         ) : pane === "survey" ? (

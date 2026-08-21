@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type UserConfig } from "tsdown";
@@ -6,6 +7,16 @@ import { transform } from "lightningcss";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ID = "dsh-okf";
+
+// `graphology`/`sigma` extend Node's `events.EventEmitter`. In the browser
+// plugin loader `events` is neither a platform module nor materialized, so it
+// must be bundled with the npm `events` polyfill instead of being externalized
+// as a Node builtin. Resolve it from graphology's dependency context (pnpm
+// isolates it from the project root). Note: `require.resolve("events")` returns
+// the bare specifier (Node builtin), so we must resolve the package subpath to
+// get the real file path on disk.
+const _require = createRequire(import.meta.url);
+const EVENTS_ENTRY = createRequire(_require.resolve("graphology")).resolve("events/events.js");
 
 const PLATFORM_MODULES = [
   "react",
@@ -50,9 +61,21 @@ const client: UserConfig = {
   dts: false,
   sourcemap: true,
   clean: false,
+  alias: {
+    // graphology and sigma extend `events.EventEmitter`; alias the Node
+    // builtin name to the npm events polyfill so it is bundled instead of
+    // staying external (the browser plugin loader cannot resolve `events`).
+    events: EVENTS_ENTRY,
+  },
   deps: {
     neverBundle: [...PLATFORM_MODULES],
-    alwaysBundle: ["cytoscape"],
+    alwaysBundle: [
+      /^sigma(\/.*)?$/,
+      /^graphology(\/.*)?$/,
+      /^graphology-layout-forceatlas2(\/.*)?$/,
+      /^graphology-utils(\/.*)?$/,
+      /^@sigma\/(node-border|utils)(\/.*)?$/,
+    ],
   },
   define: {
     "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV ?? "production"),

@@ -1,6 +1,6 @@
 import { useId, useMemo, useRef, useState } from "react";
 import { layoutEdges, layoutForceGraph, type LaidOutNode } from "./graph-layout.ts";
-import { GraphNetwork } from "./GraphNetwork.tsx";
+import { GraphNetwork, type GraphNetworkProps } from "./GraphNetwork.tsx";
 import { graphSignature, type GraphData } from "./graph-model.ts";
 import css from "./GraphCanvas.module.css";
 
@@ -15,6 +15,7 @@ export type GraphCanvasProps = {
   relayoutLabel?: string;
   focusNonce?: number;
   onSelect?: (id: string | null) => void;
+  t?: GraphNetworkProps["t"];
 };
 
 type HoverTip = {
@@ -38,6 +39,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
         relayoutLabel={props.relayoutLabel}
         focusNonce={props.focusNonce}
         onSelect={props.onSelect}
+        t={props.t}
       />
     );
   }

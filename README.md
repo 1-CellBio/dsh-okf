@@ -160,7 +160,7 @@ OKF_EXPORT_DIR=/path/to/your/manuscripts
 
 修改 `dsh.client` 后需重启 `dsh web`；客户端扫描会缓存否定结论直到重启。
 
-图谱为 SVG，按类型分列布局（Paper → Topic → Method → Entity → Claim），不引入 Vite workbench 或 cytoscape。
+图谱渲染：聊天卡片小图为 SVG，按类型分列布局（Paper → Topic → Method → Entity → Claim）；图谱页大图使用 WebGL（sigma.js + graphology，ForceAtlas2 布局，≥2000 节点走 Web Worker 后台计算），支持上万节点流畅交互。不引入 Vite workbench 或 cytoscape。
 
 客户端样式使用 CSS Modules 与 `--dsw-*` token。React 18 是平台模块（external），本包不打包 React 和一方 UI 内部实现。
 

@@ -1,4 +1,4 @@
-/** Cytoscape cannot paint `oklch()`. Convert theme tokens to `rgb()`. */
+/** WebGL canvas renderer (sigma.js) cannot paint `oklch()`. Convert theme tokens to `rgb()`. */
 const OKLCH_RE =
   /^oklch\(\s*([0-9.]+%?)\s+([0-9.]+)\s+(-?[0-9.]+)(?:\s*\/\s*([0-9.]+%?))?\s*\)$/i;
 

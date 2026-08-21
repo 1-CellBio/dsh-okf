@@ -2,7 +2,8 @@ import { isGraphNode } from "@/lib/index/rebuild";
 import { listIndexableMarkdown, parseConceptRecord, toCatalogRecord } from "@/lib/index/catalog";
 import { typeRank } from "@/lib/okf/concepts";
 import { excerptBody } from "@/lib/graph/neighbors";
-import { selectFairClaims } from "@/lib/graph/fairClaims";
+import { selectCappedGraph } from "@/lib/graph/select";
+import { GRAPH_OVERVIEW_CAP } from "@/lib/graph/scale";
 import { paperProcessStatus, type PaperProcess } from "@/lib/library/status";
 import type { FileStore } from "@/lib/fs/types";
 import { utf8Decode } from "@/lib/fs/types";
@@ -47,7 +48,6 @@ export type WorkbenchOptions = {
 };
 
 const OVERVIEW_TYPES = new Set(["Paper", "Topic", "Method", "Entity", "Dataset", "Gene", "Pathway"]);
-const DEFAULT_NODE_CAP = 180;
 
 type WorkbenchCache = {
   optionsKey: string;
@@ -75,7 +75,7 @@ export async function libraryWorkbench(
 ): Promise<WorkbenchSnapshot> {
   const includeClaims = options.includeClaims === true;
   const minDegree = Math.max(0, options.claimMinDegree ?? 0);
-  const cap = options.maxNodes ?? DEFAULT_NODE_CAP;
+  const cap = options.maxNodes ?? GRAPH_OVERVIEW_CAP;
   const optionsKey = `${includeClaims ? "1" : "0"}:${minDegree}:${cap}`;
 
   const listed = await listIndexableMarkdown(store);
@@ -185,24 +185,19 @@ async function buildSnapshot(
         (record) => record.type === "Claim" && degreeOf(record.id, record.outgoing) >= minDegree,
       )
     : [];
-  // Claims are fairly distributed across their owning papers (each paper's best
-  // by link count first) so one paper cannot monopolize the capped graph.
-  const selected = [
-    ...eligibleOverview,
-    ...selectFairClaims(
-      eligibleClaims,
-      (record) => degreeOf(record.id, record.outgoing),
-      Math.max(0, cap - eligibleOverview.length),
-    ),
-  ].slice(0, cap);
-  const truncated = eligibleOverview.length + eligibleClaims.length > cap;
+  const { selected, truncated } = selectCappedGraph(
+    eligibleOverview,
+    eligibleClaims,
+    cap,
+    (record) => degreeOf(record.id, record.outgoing),
+  );
   const ids = new Set(selected.map((record) => record.id));
   const nodes = selected.map((record) => ({
     id: record.id,
     type: record.type,
     title: record.title ?? record.id,
     tags: record.tags,
-    excerpt: excerptBody(record.body),
+    excerpt: excerptBody(record.body, 140),
     degree: degreeOf(record.id, record.outgoing),
     ...(record.published ? { published: record.published } : {}),
   }));
