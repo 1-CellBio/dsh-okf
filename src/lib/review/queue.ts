@@ -1,5 +1,7 @@
 import { readBiblioFrontmatter } from "@/lib/biblio/apply";
 import { AlignIndex, normalizeAlignKey, type AlignEntry } from "@/lib/compile/align";
+import { catalogSymbolPair, levenshtein } from "@/lib/compile/hubMatch";
+import { alignTokens, TOKEN_ALIGN_TYPES, tokenMatch, tokensEqual } from "@/lib/compile/tokens";
 import { evidenceQuote } from "@/lib/compile/claims";
 import type { FileStore } from "@/lib/fs/types";
 import { utf8Decode } from "@/lib/fs/types";
@@ -7,6 +9,7 @@ import { listIndexableMarkdown, parseConceptRecord } from "@/lib/index/catalog";
 import { okfCachePath } from "@/lib/okf/cache";
 import { asTags, asString, paperConceptId, quoteInExtract } from "@/lib/okf/identity";
 import { parseDocument } from "@/lib/okf/parse";
+import { loadDismissedPairs, reviewPairKey } from "@/lib/review/dismiss";
 import type { ConceptRecord } from "@/types/okf";
 
 export const MERGE_REPORT_PATH = okfCachePath("merge-report.md");
@@ -25,19 +28,18 @@ export const REVIEW_KINDS = [
 
 export type ReviewKind = (typeof REVIEW_KINDS)[number];
 
-/** Exceptions a human should handle before citing. Compile-default claims are not this list. */
+/** Exceptions a human should handle. Unquoted claims are pruned, not triaged. */
 export const REVIEW_ACTION_KINDS = [
   "merge_conflict",
-  "disputed_claim",
   "near_duplicate",
   "missing_published",
+  "missing_doi",
   "low_confidence_biblio",
 ] as const satisfies readonly ReviewKind[];
 
-/** Normal compile residue. Count it; do not open it as the inbox. */
+/** Inventory leftovers. Extracted claims are the library, not a queue. */
 export const REVIEW_BACKLOG_KINDS = [
-  "extracted_claim",
-  "missing_doi",
+  "disputed_claim",
   "draft",
 ] as const satisfies readonly ReviewKind[];
 
@@ -80,41 +82,7 @@ function paperLinkCount(record: ConceptRecord): number {
   return record.outgoing.filter((id) => id.startsWith("papers/")).length;
 }
 
-/** Levenshtein with early exit above NEAR_DUP_MAX_DIST (returns 99 when too far). */
-export function levenshtein(a: string, b: string): number {
-  if (a === b) {
-    return 0;
-  }
-  if (!a.length) {
-    return b.length;
-  }
-  if (!b.length) {
-    return a.length;
-  }
-  if (Math.abs(a.length - b.length) > NEAR_DUP_MAX_DIST) {
-    return 99;
-  }
-  const prev = Array.from({ length: b.length + 1 }, (_, index) => index);
-  const curr = new Array<number>(b.length + 1);
-  for (let i = 1; i <= a.length; i++) {
-    curr[0] = i;
-    let rowMin = curr[0] ?? i;
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min((prev[j] ?? 99) + 1, (curr[j - 1] ?? 99) + 1, (prev[j - 1] ?? 99) + cost);
-      if ((curr[j] ?? 99) < rowMin) {
-        rowMin = curr[j] ?? 99;
-      }
-    }
-    if (rowMin > NEAR_DUP_MAX_DIST) {
-      return 99;
-    }
-    for (let j = 0; j <= b.length; j++) {
-      prev[j] = curr[j] ?? 99;
-    }
-  }
-  return prev[b.length] ?? 99;
-}
+export { levenshtein };
 
 /** All order-preserving subsequences of `key` after deleting up to `maxDelete`
  * characters. Two strings within Levenshtein distance `maxDelete` always share
@@ -164,8 +132,18 @@ function nearDuplicateReason(a: AlignEntry, b: AlignEntry): string | undefined {
   const kb = normalizeAlignKey(b.title);
   if (ka.length >= NEAR_DUP_MIN_LEN && kb.length >= NEAR_DUP_MIN_LEN) {
     const dist = levenshtein(ka, kb);
-    if (dist > 0 && dist <= NEAR_DUP_MAX_DIST) {
+    if (dist > 0 && dist <= NEAR_DUP_MAX_DIST && !catalogSymbolPair(ka, kb)) {
       return `edit-distance:${dist}`;
+    }
+  }
+  if (TOKEN_ALIGN_TYPES.has(a.type) && a.type === b.type) {
+    const ta = alignTokens(a.title);
+    const tb = alignTokens(b.title);
+    if (tokensEqual(ta, tb)) {
+      return "token:equal";
+    }
+    if (tokenMatch(ta, tb) || tokenMatch(tb, ta)) {
+      return "token:contain";
     }
   }
   return undefined;
@@ -277,10 +255,11 @@ export function packReviewQueue(items: ReviewItem[], cap = REVIEW_KIND_CAP): Pac
   }
   const actionTotal = REVIEW_ACTION_KINDS.reduce((sum, kind) => sum + counts[kind], 0);
   const backlogTotal = REVIEW_BACKLOG_KINDS.reduce((sum, kind) => sum + counts[kind], 0);
-  const folded = foldExtractedClaims(items);
+  const folded = foldClaimsByPaper(items);
   const packed: ReviewItem[] = [];
   let truncated = false;
-  for (const kind of REVIEW_KINDS) {
+  const kindOrder = [...REVIEW_ACTION_KINDS, ...REVIEW_BACKLOG_KINDS];
+  for (const kind of kindOrder) {
     const group = folded.filter((item) => item.kind === kind);
     if (group.length > cap) {
       truncated = true;
@@ -299,27 +278,35 @@ export function packReviewQueue(items: ReviewItem[], cap = REVIEW_KIND_CAP): Pac
   };
 }
 
-function foldExtractedClaims(items: ReviewItem[]): ReviewItem[] {
+function foldClaimsByPaper(items: ReviewItem[]): ReviewItem[] {
   const rest: ReviewItem[] = [];
   const groups = new Map<string, ReviewItem[]>();
   for (const item of items) {
-    if (item.kind !== "extracted_claim" || !item.paper) {
+    if ((item.kind !== "extracted_claim" && item.kind !== "disputed_claim") || !item.paper) {
       rest.push(item);
       continue;
     }
-    const list = groups.get(item.paper) ?? [];
+    const key = `${item.kind}|${item.paper}`;
+    const list = groups.get(key) ?? [];
     list.push(item);
-    groups.set(item.paper, list);
+    groups.set(key, list);
   }
-  const folded: ReviewItem[] = [...groups.entries()].map(([paper, list]) => {
-    const first = list[0];
+  const folded: ReviewItem[] = [...groups.entries()].map(([, list]) => {
+    const first = list[0]!;
     const n = list.length;
+    const kind = first.kind;
+    const paper = first.paper!;
     return {
-      id: `extracted_claim:${paper}`,
-      kind: "extracted_claim" as const,
+      id: `${kind}:${paper}`,
+      kind,
       path: paper.endsWith(".md") ? paper : `${paper}.md`,
-      title: first?.title ?? paper,
-      detail: n === 1 ? (first?.detail ?? "confidence: extracted") : `${n} unreviewed claims`,
+      title: first.title,
+      detail:
+        n === 1
+          ? (first.detail)
+          : kind === "disputed_claim"
+            ? `${n} unquoted claims`
+            : `${n} unreviewed claims`,
       paper,
       count: n,
     };
@@ -352,11 +339,6 @@ export async function buildReviewQueue(
   const extracts = await extractBodiesByPaper(store);
   const items: ReviewItem[] = [];
   const claimQueued = new Set<string>();
-  const paperTitle = new Map(
-    records
-      .filter((record) => record.type === "Paper")
-      .map((record) => [record.id, record.title ?? record.id] as const),
-  );
 
   for (const record of records) {
     if (record.status === "deprecated") {
@@ -416,17 +398,9 @@ export async function buildReviewQueue(
           ...(record.paper ? { paper: record.paper } : {}),
         });
         claimQueued.add(record.path);
-      } else if (confidence === "extracted") {
-        items.push({
-          id: `extracted_claim:${record.path}`,
-          kind: "extracted_claim",
-          path: record.path,
-          title: paperTitle.get(record.paper ?? "") ?? record.title ?? record.id,
-          detail: "confidence: extracted",
-          ...(record.paper ? { paper: record.paper } : {}),
-        });
-        claimQueued.add(record.path);
       }
+      // confidence=extracted is the usable default. Do not enqueue thousands
+      // of claims as if a human must stamp each one.
     }
   }
 
@@ -434,10 +408,11 @@ export async function buildReviewQueue(
     (record) => ALIGN_TYPES.has(record.type) && record.status !== "deprecated",
   );
   const seenPairs = new Set<string>();
+  const dismissed = await loadDismissedPairs(store);
 
   const pushNearDuplicate = (a: ConceptRecord, b: ConceptRecord): void => {
-    const pairKey = [a.path, b.path].sort().join("|");
-    if (seenPairs.has(pairKey)) {
+    const pairKey = reviewPairKey(a.path, b.path);
+    if (seenPairs.has(pairKey) || dismissed.has(pairKey)) {
       return;
     }
     const reason =

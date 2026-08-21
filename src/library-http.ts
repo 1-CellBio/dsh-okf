@@ -1,10 +1,14 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Context } from "@deepseek-ai/cordis";
 import { libraryWorkbench } from "@/lib/library/workbench";
-import { organizeWorkbench, readWorkbenchPage } from "@/lib/library/organize";
-import { listCoverage } from "./okf-ops";
+import { GRAPH_HARD_CAP } from "@/lib/graph/scale";
+import { organizeWorkbench, readWorkbenchPage, resetOrganizeCache } from "@/lib/library/organize";
+import { canonicalizeOkfOp, listCoverage } from "./okf-ops";
 import { sessionCwd, type PluginPaths } from "./paths";
 import { openSession } from "./session";
+import { dismissReviewPair } from "@/lib/review/dismiss";
+import { heuristicSuggest, suggestNearDuplicate, type ReviewSuggest } from "@/lib/review/suggest";
+import { harnessChatClient } from "./llm-client";
 import type { PathSource } from "./settings";
 
 type AgentsLookup = {
@@ -31,6 +35,8 @@ export function installLibraryHttp(ctx: Context, getPaths: PathSource): void {
       { path: "/okf/organize", handle: (req, res) => handleOrganize(req, res, agents, getPaths) },
       { path: "/okf/coverage", handle: (req, res) => handleCoverage(req, res, agents, getPaths) },
       { path: "/okf/page", handle: (req, res) => handlePage(req, res, agents, getPaths) },
+      { path: "/okf/review", handle: (req, res) => handleReview(req, res, agents, getPaths) },
+      { path: "/okf/review-suggest", handle: (req, res) => handleReviewSuggest(req, res, agents, getPaths, ctx) },
     ];
     for (const route of routes) {
       inner.effect(() =>
@@ -64,7 +70,7 @@ async function handleLibrary(
     if (rawMax.trim() !== "") {
       const parsed = Number(rawMax);
       if (Number.isFinite(parsed)) {
-        maxNodes = parsed <= 0 ? Infinity : Math.min(20000, Math.floor(parsed));
+        maxNodes = parsed <= 0 ? GRAPH_HARD_CAP : Math.min(GRAPH_HARD_CAP, Math.floor(parsed));
       }
     }
     json(res, 200, await libraryWorkbench(store, {
@@ -121,6 +127,129 @@ async function handlePage(
     json(res, 200, await readWorkbenchPage(store, id));
   } catch (error) {
     fail(res, error);
+  }
+}
+
+async function handleReview(
+  req: IncomingMessage,
+  res: ServerResponse,
+  agents: AgentsLookup,
+  getPaths: PathSource,
+): Promise<void> {
+  try {
+    if ((req.method ?? "GET") !== "POST") {
+      throw Object.assign(new Error("POST required"), { status: 405 });
+    }
+    const { store } = openFromRequest(req, agents, getPaths);
+    const body = await readJson(req);
+    const action = asField(body, "action");
+    const from = asField(body, "from");
+    const to = asField(body, "to");
+    if ((action !== "merge" && action !== "dismiss") || !from || !to) {
+      throw Object.assign(new Error("review requires action=merge|dismiss and from, to"), { status: 400 });
+    }
+    if (action === "merge") {
+      const result = await canonicalizeOkfOp(store, from, to);
+      resetOrganizeCache();
+      json(res, 200, { ok: true, action, ...result });
+      return;
+    }
+    await dismissReviewPair(store, from, to);
+    resetOrganizeCache();
+    json(res, 200, { ok: true, action, from, to });
+  } catch (error) {
+    fail(res, error);
+  }
+}
+
+const suggestCache = new Map<string, ReviewSuggest>();
+
+async function handleReviewSuggest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  agents: AgentsLookup,
+  getPaths: PathSource,
+  ctx: Context,
+): Promise<void> {
+  try {
+    if ((req.method ?? "GET") !== "GET") {
+      throw Object.assign(new Error("GET required"), { status: 405 });
+    }
+    const { url, store } = openFromRequest(req, agents, getPaths);
+    const left = url.searchParams.get("left")?.trim() ?? "";
+    const right = url.searchParams.get("right")?.trim() ?? "";
+    const reason = url.searchParams.get("reason")?.trim() ?? "";
+    if (!left || !right) {
+      throw Object.assign(new Error("review-suggest requires left and right"), { status: 400 });
+    }
+    const cacheKey = `${left}\0${right}\0${reason}`;
+    const cached = suggestCache.get(cacheKey);
+    if (cached) {
+      json(res, 200, cached);
+      return;
+    }
+    const [leftPage, rightPage] = await Promise.all([
+      readWorkbenchPage(store, left),
+      readWorkbenchPage(store, right),
+    ]);
+    const titles = {
+      reason,
+      leftTitle: leftPage.title || left,
+      rightTitle: rightPage.title || right,
+    };
+    const ac = new AbortController();
+    const onClose = (): void => {
+      if (!res.writableEnded) {
+        ac.abort();
+      }
+    };
+    res.once("close", onClose);
+    const timer = setTimeout(() => ac.abort(), 40_000);
+    let suggestion: ReviewSuggest;
+    try {
+      suggestion = await suggestNearDuplicate(harnessChatClient(ctx, ac.signal), {
+        ...titles,
+        leftPath: leftPage.path,
+        leftBody: leftPage.body,
+        rightPath: rightPage.path,
+        rightBody: rightPage.body,
+      });
+    } catch {
+      suggestion = heuristicSuggest(titles);
+    } finally {
+      clearTimeout(timer);
+      res.off("close", onClose);
+    }
+    if (suggestion.source === "ai") {
+      suggestCache.set(cacheKey, suggestion);
+    }
+    json(res, 200, suggestion);
+  } catch (error) {
+    fail(res, error);
+  }
+}
+
+function asField(body: unknown, key: string): string {
+  if (!body || typeof body !== "object") {
+    return "";
+  }
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    return {};
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw Object.assign(new Error("invalid JSON body"), { status: 400 });
   }
 }
 

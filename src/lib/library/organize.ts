@@ -1,8 +1,10 @@
+import { pruneUnquotedClaims } from "@/lib/compile/pruneClaims";
 import { excerptBody } from "@/lib/graph/neighbors";
 import type { FileStore } from "@/lib/fs/types";
 import { utf8Decode } from "@/lib/fs/types";
 import { isIndexableMarkdown, parseConceptRecord } from "@/lib/index/catalog";
 import { stampEquals, stampPaths, type FileStamp } from "@/lib/index/stamps";
+import { resetWorkbenchCache } from "@/lib/library/workbench";
 import { isOkfCachePath } from "@/lib/okf/cache";
 import { asString } from "@/lib/okf/identity";
 import { conceptPath, toConceptId } from "@/lib/okf/links";
@@ -73,12 +75,25 @@ export async function organizeWorkbench(store: FileStore): Promise<OrganizeSnaps
     return cached.snapshot;
   }
 
+  const prune = await pruneUnquotedClaims(store);
+  let stampMap = stamps;
+  let paths = listed;
+  if (prune.pruned > 0 || prune.healed > 0) {
+    resetWorkbenchCache();
+    paths = (await store.list("")).filter((path) => path.endsWith(".md") || path.endsWith(".bib") || path.endsWith(".tex"));
+    const nextStamps = await stampPaths(store, paths);
+    stampMap = new Map<string, FileStamp>();
+    paths.forEach((path, index) => {
+      stampMap.set(path, nextStamps[index]!);
+    });
+  }
+
   const notes: OrganizeCard[] = [];
   const questions: OrganizeCard[] = [];
   const surveys: OrganizeCard[] = [];
   const manuscripts: string[] = [];
 
-  for (const path of listed) {
+  for (const path of paths) {
     if (path.startsWith("manuscripts/") && !isOkfCachePath(path)) {
       manuscripts.push(path);
       continue;
@@ -120,7 +135,7 @@ export async function organizeWorkbench(store: FileStore): Promise<OrganizeSnaps
     surveys,
     manuscripts,
   };
-  organizeCache = { root: store.root, stamps, snapshot };
+  organizeCache = { root: store.root, stamps: stampMap, snapshot };
   return snapshot;
 }
 

@@ -68,15 +68,14 @@ export const REVIEW_KINDS: ReviewKind[] = [
 
 export const REVIEW_ACTION_KINDS: ReviewKind[] = [
   "merge_conflict",
-  "disputed_claim",
   "near_duplicate",
   "missing_published",
+  "missing_doi",
   "low_confidence_biblio",
 ];
 
 export const REVIEW_BACKLOG_KINDS: ReviewKind[] = [
-  "extracted_claim",
-  "missing_doi",
+  "disputed_claim",
   "draft",
 ];
 
