@@ -40,7 +40,13 @@ export class TextExtractor implements Extractor {
       // them as scan-like. PDFs with severe broken words are routed to full
       // vision too: the vision model re-reads pixels and produces clean text.
       needsVision:
-        raw.pageCount > 0 && (needsVision(raw.text, raw.pageCount) || raw.brokenWords === true),
+        raw.pageCount > 0 &&
+        needsVision({
+          text: raw.text,
+          pageCount: raw.pageCount,
+          imagePages: raw.pages.filter((page) => page.hasImage).length,
+          brokenWords: raw.brokenWords === true,
+        }),
     };
   }
 }

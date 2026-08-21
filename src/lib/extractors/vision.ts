@@ -24,7 +24,11 @@ export type VisionExtractResult = {
 
 export type VisionExtractInput = {
   client: ChatClient;
-  jpegByPage: Map<number, Uint8Array>;
+  /** Optional pre-rastered JPEGs (tests). Prefer rasterPage so pages are
+   *  rendered lazily — a 40-page scan should not hold 40 JPEGs at once. */
+  jpegByPage?: Map<number, Uint8Array>;
+  /** Raster a page on demand. Results are cached for retries of the same page. */
+  rasterPage?: (page: number) => Promise<Uint8Array>;
   pages: number[];
   retryDelayMs?: number;
   onProgress?: (line: string) => void;
@@ -184,19 +188,29 @@ export function checkVisionMarkdown(markdown: string, pages: number[]): Markdown
   return { ok: true };
 }
 
+async function jpegFor(input: VisionExtractInput, page: number): Promise<Uint8Array> {
+  const cached = input.jpegByPage?.get(page);
+  if (cached) {
+    return cached;
+  }
+  if (!input.rasterPage) {
+    throw new Error(`missing raster for page ${page}`);
+  }
+  const jpeg = await input.rasterPage(page);
+  const bag = input.jpegByPage ?? new Map<number, Uint8Array>();
+  bag.set(page, jpeg);
+  input.jpegByPage = bag;
+  return jpeg;
+}
+
 async function completePages(input: VisionExtractInput, pages: number[]): Promise<string> {
+  const images = await Promise.all(pages.map((page) => jpegFor(input, page)));
   const parts = [
     { type: "text" as const, text: visionUserText(pages) },
-    ...pages.map((page) => {
-      const jpeg = input.jpegByPage.get(page);
-      if (!jpeg) {
-        throw new Error(`missing raster for page ${page}`);
-      }
-      return {
-        type: "image_url" as const,
-        image_url: { url: jpegToDataUrl(jpeg) },
-      };
-    }),
+    ...images.map((jpeg) => ({
+      type: "image_url" as const,
+      image_url: { url: jpegToDataUrl(jpeg) },
+    })),
   ];
   return input.client.complete([
     { role: "system", content: VISION_SYSTEM_PROMPT },

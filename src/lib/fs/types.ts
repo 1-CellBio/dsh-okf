@@ -21,9 +21,9 @@ export interface FileStore {
   stat(path: string): Promise<FileStat | null>;
 }
 
-/** Bundle-relative path without a leading slash: `papers/foo.md` */
+/** Bundle-relative path without a leading or trailing slash: `papers/foo.md`. */
 export function normalizeStorePath(path: string): string {
-  return path.replace(/^\/+/, "").replace(/\\/g, "/");
+  return path.replace(/^\/+/, "").replace(/\\/g, "/").replace(/\/+$/g, "");
 }
 
 export function utf8Decode(data: Uint8Array): string {

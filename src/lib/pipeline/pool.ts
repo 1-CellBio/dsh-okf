@@ -44,3 +44,16 @@ export async function mapPool<T, R>(
   await Promise.all(Array.from({ length: limit }, () => run()));
   return results;
 }
+
+/** Serialize async critical sections (shared in-memory vocab / pipeline state). */
+export function createMutex(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let chain: Promise<unknown> = Promise.resolve();
+  return (fn) => {
+    const run = chain.then(fn, fn);
+    chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+}

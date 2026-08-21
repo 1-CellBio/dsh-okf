@@ -18,6 +18,7 @@ import {
   libraryStatsOp,
   mergeOkfOp,
   packOkfOp,
+  canonicalizeOkfOp,
   saveNoteOp,
   saveSurveyOp,
   searchOkf,
@@ -297,15 +298,20 @@ export function registerTools(ctx: Context, getPaths: PathSource): void {
   ctx.tools.register(defineTool({
     name: "okf_evidence",
     description:
-      "Gather top Claim pages for a question (the OKF citation atom). Returns claim titles, paper ids, and short excerpts — not paper bodies. Prefer this over okf_get when answering from the literature.",
+      "Gather top Claim pages for a question (the OKF citation atom). Returns claim titles, paper ids, and short excerpts — not paper bodies. Optional from/to filter by the linked paper's published date. Prefer this over okf_get when answering from the literature.",
     parameters: {
       query: { type: "string", required: true, description: "Question or keywords to match claims" },
+      from: { type: "string", description: "Optional published year or date lower bound on the linked paper" },
+      to: { type: "string", description: "Optional published year or date upper bound on the linked paper" },
     },
     output: jsonOutput,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const session = openSession(pathsOf(getPaths, exec).okfDir);
-      return gatherEvidenceOp(session.store, args.query);
+      return gatherEvidenceOp(session.store, args.query, {
+        from: asString(args.from),
+        to: asString(args.to),
+      });
     },
     presentCall: (args) => present("Gather OKF claims", "search", args.query),
   }));
@@ -517,23 +523,48 @@ export function registerTools(ctx: Context, getPaths: PathSource): void {
   }));
 
   ctx.tools.register(defineTool({
+    name: "okf_canonicalize",
+    description:
+      "Merge a duplicate hub page into a canonical one (Topic/Method/Entity/Dataset/Gene/Pathway). Rewrites markdown links library-wide and leaves the source as a deprecated redirect. Use this for review-queue near_duplicate rows the automatic consolidate pass did not merge.",
+    parameters: {
+      from: { type: "string", required: true, description: "Duplicate page to deprecate, e.g. topics/foo.md" },
+      to: { type: "string", required: true, description: "Canonical page to keep, e.g. topics/bar.md" },
+    },
+    output: jsonOutput,
+    async execute(args, exec) {
+      const session = openSession(pathsOf(getPaths, exec).okfDir);
+      const from = asString(args.from);
+      const to = asString(args.to);
+      if (!from || !to) {
+        throw new Error("okf_canonicalize requires from and to");
+      }
+      return canonicalizeOkfOp(session.store, from, to);
+    },
+    presentCall: (args) => present("Merge hub pages", "edit", args.from),
+  }));
+
+  ctx.tools.register(defineTool({
     name: "okf_ingest",
     description:
-      "Extract documents (pdf/docx/pptx/xlsx/epub/rtf/csv/md/…) into this workspace. PDFs: text layer via anydoc (Rust), figure/scan pages rasterized and sent to the harness multimodal model, then compile. Other formats convert straight to Markdown (no vision). PDFs whose anydoc text layer shows severe broken words (word-splitting like \"C opyright\") automatically route to full-document vision so the model re-reads pixels. Vision requests are small batches with timeout retries; a re-run resumes remaining pages. Default vision=\"auto\" runs full vision up to visionMaxPages (default 12) and pauses with awaiting_vision above that — then re-run with vision=all (full) / figures (figure pages only) / skip / pages:N,N,N. Long-running: defaults to a background job; read job_output.",
+      "Extract documents (pdf/docx/pptx/xlsx/epub/rtf/csv/md/…) into this workspace. Paths may be files or directories (directories recurse). PDFs: text layer via anydoc (Rust); planned vision pages are rasterized and sent to the harness multimodal model (2 pages per request, retries timeouts, resumes remaining pages), then the full extract is compiled in segments so later pages are not dropped. Other formats convert straight to Markdown (no vision). PDFs whose anydoc text layer shows severe broken words automatically route to full-document vision. Default vision=\"auto\" transcribes every planned page (scans: all pages; born-digital: figure + thin-text pages) with no pause. vision=\"all\" sends every PDF page. vision=\"figures\" / skip / pages:N,N,N remain available. Optional visionMaxPages pauses auto above that count. Long-running: defaults to a background job; read job_output.",
     parameters: {
       pdfs: {
         type: "array",
         required: true,
         items: { type: "string" },
-        description: "Document paths: absolute, or relative to the sources dir (sources/pdfs for PDFs)",
+        description: "Files or directories: absolute, or relative to the sources dir (sources/pdfs for PDFs)",
       },
       compile: { type: "boolean", description: "Compile after extract (default true)" },
       vision: {
         type: "string",
         description:
-          'Default "auto": run full vision up to visionMaxPages pages, above that pause with awaiting_vision and list choices. "all": full vision regardless of count. "figures": figure pages only. "skip": skip optional figure pages on born-digital PDFs (scans still need vision). "pages:N,N,N": explicit page subset.',
+          'Default "auto": transcribe every planned page (scans = all pages; born-digital = figures + thin-text). "all": every PDF page. "figures": figure pages only. "skip": skip optional figure pages on born-digital PDFs (scans still need vision). "pages:N,N,N": explicit page subset.',
       },
-      visionMaxPages: { type: "integer", description: "Pause budget for vision=auto (default 12)" },
+      visionMaxPages: {
+        type: "integer",
+        description: "Optional. Only for vision=auto: pause with awaiting_vision above this many planned pages. Unset = never pause.",
+      },
+      concurrency: { type: "integer", description: "Parallel documents (default 3)" },
       skipVision: { type: "boolean", description: "Legacy alias for vision=\"skip\"." },
       run_in_background: {
         type: "boolean",
@@ -549,6 +580,7 @@ export function registerTools(ctx: Context, getPaths: PathSource): void {
         skipVision: args.skipVision,
         vision: asString(args.vision),
         visionMaxPages: typeof args.visionMaxPages === "number" ? args.visionMaxPages : undefined,
+        concurrency: typeof args.concurrency === "number" ? args.concurrency : undefined,
       };
       return asJson(await maybeBackground(
         ctx,
@@ -572,7 +604,7 @@ export function registerTools(ctx: Context, getPaths: PathSource): void {
   ctx.tools.register(defineTool({
     name: "okf_compile",
     description:
-      "Compile existing extracts/*.md into Paper / Topic / Method / Entity / Dataset / Claim using the harness default model (Gene / Pathway are opt-in via stages). Long-running; defaults to a background job. Omit paper to compile every extract (already-compiled papers with the current schema and unchanged extract are skipped, so reruns are cheap). paper may be a papers/ id, an extracts/*.md path, or a source filename (PDF or other) — extracts are named after the source file until compile writes paper:. Passing paper always forces a recompile of that target.",
+      "Compile existing extracts/*.md into Paper / Topic / Method / Entity / Dataset / Claim using the harness default model (Gene / Pathway are opt-in via stages). Uses the full extract in ~12k-character segments (not just the opening). Long-running; defaults to a background job. Omit paper to compile every extract (already-compiled papers with the current schema and unchanged extract are skipped, so reruns are cheap). paper may be a papers/ id, an extracts/*.md path, or a source filename (PDF or other) — extracts are named after the source file until compile writes paper:. Passing paper always forces a recompile of that target.",
     parameters: {
       paper: {
         type: "string",
@@ -584,7 +616,7 @@ export function registerTools(ctx: Context, getPaths: PathSource): void {
         description:
           "Default: biblio|concepts|claims|digest. Genes and pathways are NOT extracted by default — include \"genes\" and/or \"pathways\" only when the user explicitly asks for gene/pathway extraction (e.g. [\"biblio\",\"concepts\",\"claims\",\"digest\",\"genes\",\"pathways\"], or just [\"genes\"] for an incremental gene-only pass).",
       },
-      concurrency: { type: "integer", description: "Parallel extracts (default 2)" },
+      concurrency: { type: "integer", description: "Parallel extracts (default 3)" },
       run_in_background: { type: "boolean", description: "Default true" },
     },
     output: jsonOutput,

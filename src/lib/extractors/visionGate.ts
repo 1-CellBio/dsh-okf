@@ -1,4 +1,7 @@
-/** Default vision page budget. Above this many planned visual pages,
- *  okf_ingest with vision="auto" pauses (awaiting_vision) and asks the user to
- *  choose: all / figures / skip / an explicit page subset. */
-export const VISION_PAUSE_DEFAULT = 12;
+/**
+ * Optional cost cap for vision="auto". When unset, every planned visual page
+ * is transcribed (scans: all pages; born-digital: figure + thin-text pages).
+ * Pass visionMaxPages on okf_ingest only when you want awaiting_vision instead
+ * of finishing a long document.
+ */
+export const VISION_PAUSE_DEFAULT: number | undefined = undefined;
