@@ -15,6 +15,26 @@ export type RetrieveQuery = {
   vectorHits?: SearchHit[];
 };
 
+function effectivePublished(index: BundleIndex, record: ConceptRecord): string | undefined {
+  if (record.published) {
+    return record.published;
+  }
+  if (record.paper) {
+    return index.concepts.get(record.paper)?.published;
+  }
+  return undefined;
+}
+
+function effectiveTags(index: BundleIndex, record: ConceptRecord): string[] {
+  if (record.tags.length > 0) {
+    return record.tags;
+  }
+  if (record.paper) {
+    return index.concepts.get(record.paper)?.tags ?? [];
+  }
+  return record.tags;
+}
+
 function inPublishedRange(published: string | undefined, from?: string, to?: string): boolean {
   if (!from && !to) {
     return true;
@@ -84,11 +104,12 @@ export function retrieve(index: BundleIndex, query: RetrieveQuery = {}): Concept
       return false;
     }
     if (query.tags && query.tags.length > 0) {
-      if (!query.tags.every((tag) => record.tags.includes(tag))) {
+      const tags = effectiveTags(index, record);
+      if (!query.tags.every((tag) => tags.includes(tag))) {
         return false;
       }
     }
-    if (!inPublishedRange(record.published, query.publishedFrom, query.publishedTo)) {
+    if (!inPublishedRange(effectivePublished(index, record), query.publishedFrom, query.publishedTo)) {
       return false;
     }
     return true;

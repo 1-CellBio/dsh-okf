@@ -43,13 +43,13 @@ const EXAMPLES: OkfHelpExample[] = [
   {
     id: "A2",
     ask: "这些论文的共同点是什么？先给枢纽（Topic / Method / Entity），不要逐篇摘要。",
-    expect: "先 okf_stats，再 okf_compare 且带 query 或短 papers 列表。",
+    expect: "先 okf_stats，再 okf_compare 且带 query 或短 papers 列表。共享枢纽含 Topic/Method/Entity/Dataset/Gene/Pathway。",
     fail: "对全库 okf_compare（>24 篇应报错）；或多次 okf_get。",
   },
   {
     id: "B1",
     ask: "文献里关于库中最热主题有哪些可引用的主张？列出 claims/ id，每条一句，并标明来自哪篇 papers/。不要读整篇 Paper。",
-    expect: "okf_evidence 或带 type=Claim 的 okf_search。只引用工具返回的 id。",
+    expect: "okf_evidence 或带 type=Claim 的 okf_search。近年主张可加 from。只引用工具返回的 id。",
     fail: "编造 DOI / Claim id；okf_get 多篇 Paper。",
   },
   {
@@ -180,7 +180,7 @@ const SUBPAGES: OkfSubpage[] = [
   {
     id: "review",
     name: "校对",
-    description: "默认只看需处理的异常：引文失配、近义、缺日期、合并冲突。待校对主张是编译积压，按论文折叠",
+    description: "默认只看需处理：近义枢纽、缺日期、书目、合并冲突。编译主张可直接用，不在此逐条校对",
   },
   {
     id: "coverage",
@@ -208,7 +208,7 @@ const TOOL_STEPS: OkfToolStep[] = [
   {
     id: "evidence",
     tool: "okf_evidence",
-    text: "文献怎么说（Claim），必要时再 okf_get 一页",
+    text: "文献怎么说（Claim）；可用 from/to 按论文发表年过滤",
   },
   {
     id: "search",

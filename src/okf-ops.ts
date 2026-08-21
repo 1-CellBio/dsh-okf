@@ -17,9 +17,12 @@ import { conceptPath, extractLinks, toConceptId } from "@/lib/okf/links";
 import { parseDocument } from "@/lib/okf/parse";
 import { serializeDocument } from "@/lib/okf/serialize";
 import { conceptSlug } from "@/lib/okf/slug";
-import { isHumanVerified } from "@/lib/okf/validate";
+import { canonicalizeConcept } from "@/lib/okf/canonicalize";
+import { resetOrganizeCache } from "@/lib/library/organize";
+import { resetWorkbenchCache } from "@/lib/library/workbench";
 import { excerptBody, groupNeighbors, mergeNeighbors, type NeighborLink, type NeighborRef } from "@/lib/graph/neighbors";
 import { selectFairClaims } from "@/lib/graph/fairClaims";
+import { isHumanVerified } from "@/lib/okf/validate";
 import { loadState } from "@/lib/pipeline/state";
 import { refreshRootIndex } from "@/lib/pipeline/log";
 import { listCoverageGaps } from "@/lib/coverage/gaps";
@@ -782,6 +785,9 @@ export async function libraryStatsOp(store: FileStore): Promise<{
   const yearMap = new Map<string, number>();
   const tagMap = new Map<string, Set<string>>();
   for (const record of index.concepts.values()) {
+    if (record.status === "deprecated") {
+      continue;
+    }
     counts[record.type] = (counts[record.type] ?? 0) + 1;
     if (record.type !== "Paper") {
       continue;
@@ -905,7 +911,7 @@ export async function libraryCheckOp(store: FileStore): Promise<{
   let isolatedConcepts = 0;
   let unreferencedConcepts = 0;
   for (const record of index.concepts.values()) {
-    if (!hubNodeTypes.has(record.type)) {
+    if (!hubNodeTypes.has(record.type) || record.status === "deprecated") {
       continue;
     }
     const out = (record.outgoing ?? []).filter((target) => target !== record.id && index.concepts.has(target));
@@ -991,6 +997,7 @@ export async function libraryCheckOp(store: FileStore): Promise<{
 export async function gatherEvidenceOp(
   store: FileStore,
   query: string,
+  options: { from?: string; to?: string } = {},
 ): Promise<{
   query: string;
   claims: Array<{
@@ -1013,11 +1020,25 @@ export async function gatherEvidenceOp(
   let claims = retrieve(index, {
     text: trimmed,
     type: "Claim",
+    publishedFrom: options.from?.trim() || undefined,
+    publishedTo: options.to?.trim() || undefined,
     ...(vectorHits ? { vectorHits } : {}),
-  }).slice(0, EVIDENCE_CAP);
+  })
+    .filter((record) => record.status !== "deprecated" && record.confidence !== "disputed")
+    .slice(0, EVIDENCE_CAP);
   if (claims.length === 0) {
-    claims = retrieve(index, { text: trimmed, ...(vectorHits ? { vectorHits } : {}) })
-      .filter((record) => record.type === "Claim")
+    claims = retrieve(index, {
+      text: trimmed,
+      publishedFrom: options.from?.trim() || undefined,
+      publishedTo: options.to?.trim() || undefined,
+      ...(vectorHits ? { vectorHits } : {}),
+    })
+      .filter(
+        (record) =>
+          record.type === "Claim" &&
+          record.status !== "deprecated" &&
+          record.confidence !== "disputed",
+      )
       .slice(0, EVIDENCE_CAP);
   }
   const paperHits = new Map<string, number>();
@@ -1397,6 +1418,19 @@ export async function compileSurveyOp(
   );
   invalidateBundleIndex(store);
   await refreshRootIndex(store);
+  return result;
+}
+
+export async function canonicalizeOkfOp(
+  store: FileStore,
+  from: string,
+  to: string,
+): Promise<{ from: string; to: string; rewritten: string[] }> {
+  const result = await canonicalizeConcept(store, from, to);
+  invalidateBundleIndex(store);
+  await refreshRootIndex(store);
+  resetOrganizeCache();
+  resetWorkbenchCache();
   return result;
 }
 

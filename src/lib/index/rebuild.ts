@@ -29,7 +29,16 @@ export type RebuildOptions = {
 };
 
 export function isGraphNode(record: ConceptRecord): boolean {
-  return (GRAPH_NODE_TYPES as readonly string[]).includes(record.type) && record.status !== "deprecated";
+  if (!(GRAPH_NODE_TYPES as readonly string[]).includes(record.type)) {
+    return false;
+  }
+  if (record.status === "deprecated") {
+    return false;
+  }
+  if (record.type === "Claim" && record.confidence === "disputed") {
+    return false;
+  }
+  return true;
 }
 
 async function rebuildMiniIndex(store: FileStore): Promise<BundleIndex> {
