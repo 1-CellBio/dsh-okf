@@ -4,8 +4,6 @@
 
 DeepSeek Harness plugin: ingest research PDFs into a **citable OKF markdown library**, then search and write surveys in the same conversation.
 
-> This directory is the installable bundle (`dsh.bundle` + `cordis.patch.yml`). Do **not** `plugin add` the OKF library repo root (that is a Vite workbench) or a nested `deepseek-harness/` checkout.
->
 > Model selection is **entirely Harness-controlled**. There is no OKF API key, base URL, or model field.
 
 ![OKF library knowledge graph UI](./OKF_main.png)

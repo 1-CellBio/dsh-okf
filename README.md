@@ -4,8 +4,6 @@
 
 DeepSeek Harness 插件：把科研 PDF 收录进**可引用的 OKF Markdown 文库**，并在同一个会话中完成检索与综述写作。
 
-> 本目录是可直接安装的插件包（`dsh.bundle` + `cordis.patch.yml`）。请勿对 OKF 文库仓库根目录（那是 Vite workbench）或嵌套的 `deepseek-harness/` checkout 执行 `plugin add`。
->
 > 模型选择**完全由 Harness 控制**，OKF 没有自己的 API key、base URL 或模型配置项。
 
 ![OKF 文库知识图谱界面](./OKF_main.png)
