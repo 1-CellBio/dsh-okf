@@ -5,7 +5,9 @@ import {
   formatVocabularyForPrompt,
   loadAlignVocabulary,
   normalizeAlignKey,
+  type AlignEntry,
 } from "@/lib/compile/align";
+import { parentheticals } from "@/lib/compile/hubMatch";
 import { bindExtractToPaper } from "@/lib/extractors/bind";
 import { withPathLock } from "@/lib/fs/pathLock";
 import type { FileStore } from "@/lib/fs/types";
@@ -19,7 +21,10 @@ import { isHumanVerified } from "@/lib/okf/validate";
 import type { ChatClient } from "@/lib/providers/types";
 import { mapPool } from "@/lib/pipeline/pool";
 import { ensureLink, mergePaperLinks, rewriteBundleHref } from "./mergeLinks";
-import { parseClaimsOnly, parseCompileOutput } from "./parseOutput";
+import { parseClaimsOnly, parseCompileOutput, parseSegmentOutput } from "./parseOutput";
+import { applyHubMergesToBody, consolidateHubs } from "./consolidate";
+import { aliasAlignIncoming } from "./aliasPass";
+import { knownTitlesOf, mergeCompileOutput } from "./mergeOutput";
 import {
   clearCompileOutput,
   DeadLinkError,
@@ -31,14 +36,17 @@ import {
 } from "./deadLinks";
 import {
   COMPILE_SCHEMA_VERSION,
+  compileSegmentSystemPrompt,
+  compileSegmentUserPrompt,
   compileSystemPrompt,
   compileUserPrompt,
   EXTRACT_CHAR_LIMIT,
   repairUserPrompt,
+  SEGMENT_COMPILE_CONCURRENCY,
 } from "./prompt";
 import { CLAIMS_SYSTEM_PROMPT, claimsUserPrompt } from "./promptClaims";
 import { segmentExtract, writeClaims } from "./claims";
-import type { CompileClaim, CompileConcept, CompileOutput } from "./types";
+import type { CompileClaim, CompileConcept, CompileOutput, CompileSegmentOutput } from "./types";
 
 export type CompileInput = {
   extractText: string;
@@ -108,6 +116,8 @@ export type CompileOptions = {
    * the rebuildable cache, reuse it so a retry resumes from the write/link-guard
    * phase instead of re-running the model. Default true. */
   resumeCompile?: boolean;
+  /** Progress lines (ingest / compile job_output). */
+  onLog?: (line: string) => void;
 };
 
 function selectedStages(options: CompileOptions): Set<CompileStage> {
@@ -164,7 +174,11 @@ function unionAliases(existing: unknown, canonicalTitle: string, incomingTitle: 
     normalizeAlignKey(incomingTitle) !== normalizeAlignKey(canonicalTitle)
       ? [incomingTitle.trim()]
       : [];
-  return [...new Set([...asTags(existing), ...extra])];
+  const skip = normalizeAlignKey(canonicalTitle);
+  const parens = [...parentheticals(canonicalTitle), ...parentheticals(incomingTitle)].filter(
+    (alias) => normalizeAlignKey(alias) !== skip,
+  );
+  return [...new Set([...asTags(existing), ...extra, ...parens])];
 }
 
 async function upsertPaper(
@@ -241,6 +255,7 @@ async function upsertRelated(
       );
       return "written";
     }
+    const aliases = unionAliases([], incoming.title, incoming.incomingTitle);
     await store.write(
       path,
       serializeDocument(
@@ -249,6 +264,7 @@ async function upsertRelated(
           title: incoming.title,
           tags: incoming.tags ?? [],
           generated: incoming.generated,
+          ...(aliases.length > 0 ? { aliases } : {}),
         },
         ensureLink(incoming.body, incoming.paperTitle, incoming.paperHref),
       ),
@@ -266,6 +282,7 @@ async function writeRelated(
   paperHref: string,
   paperTitle: string,
   vocab: AlignIndex,
+  llmHits?: Map<string, AlignEntry>,
 ): Promise<{
   paths: string[];
   skipped: string[];
@@ -278,7 +295,8 @@ async function writeRelated(
   const rewrites: { from: string; to: string }[] = [];
   for (const item of items) {
     const naivePath = `${dir}/${conceptSlug(item.title)}.md`;
-    const aligned = vocab.lookup(type, item.title);
+    const aligned = vocab.lookup(type, item.title)
+      ?? llmHits?.get(normalizeAlignKey(item.title));
     const path = aligned?.path ?? naivePath;
     const canonicalTitle = aligned?.title ?? item.title;
     hrefs.push({ title: canonicalTitle, href: `/${path}` });
@@ -355,6 +373,43 @@ async function requestOutput(
   }
 }
 
+async function requestSegmentOutput(
+  client: ChatClient,
+  input: {
+    paperTitle: string;
+    segmentIndex: number;
+    segmentCount: number;
+    extractText: string;
+    knownTitles: string;
+    vocabulary: string;
+  },
+  stages: Set<CompileStage>,
+): Promise<CompileSegmentOutput> {
+  const system = compileSegmentSystemPrompt({ genes: stages.has("genes"), pathways: stages.has("pathways") });
+  const user = compileSegmentUserPrompt({
+    paperTitle: input.paperTitle,
+    segmentIndex: input.segmentIndex,
+    segmentCount: input.segmentCount,
+    extractText: input.extractText,
+    knownTitles: input.knownTitles || undefined,
+    vocabulary: input.vocabulary || undefined,
+  });
+  const first = await client.complete([
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ]);
+  try {
+    return parseSegmentOutput(first);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const repaired = await client.complete([
+      { role: "system", content: system },
+      { role: "user", content: repairUserPrompt(first, message) },
+    ]);
+    return parseSegmentOutput(repaired);
+  }
+}
+
 async function requestMoreClaims(
   client: ChatClient,
   paperTitle: string,
@@ -391,6 +446,7 @@ export async function compileExtract(
   };
   const vocab = options.alignVocabulary ?? (await loadAlignVocabulary(store));
   const segments = segmentExtract(input.extractText, EXTRACT_CHAR_LIMIT);
+  const windows = segments.length > 0 ? segments : [input.extractText];
   const needCompileJson = stages.has("biblio") || stages.has("concepts") || stages.has("digest");
 
   const existingPaper =
@@ -414,7 +470,7 @@ export async function compileExtract(
     if (cached?.kind === "claims") {
       extra = cached.claims;
     } else {
-      extra = await requestMoreClaims(client, paperTitle, segments);
+      extra = await requestMoreClaims(client, paperTitle, windows);
       await saveCompileOutput(store, input.extractText, { kind: "claims", claims: extra });
     }
     const claims = await writeClaims(store, {
@@ -426,6 +482,9 @@ export async function compileExtract(
       claims: extra,
       generated,
     });
+    if (claims.omitted > 0) {
+      options.onLog?.(`compile ${input.pdfFilename} dropped ${claims.omitted} unquoted claim(s)`);
+    }
     let body = existingPaper.body;
     for (const link of claims.hrefs) {
       body = ensureLink(body, link.title, link.href);
@@ -479,12 +538,45 @@ export async function compileExtract(
   if (cached?.kind === "full") {
     output = cached.output;
   } else {
-    output = await requestOutput(
+    options.onLog?.(
+      windows.length === 1
+        ? `compile ${input.pdfFilename} 1 segment`
+        : `compile ${input.pdfFilename} ${windows.length} segments (full extract)`,
+    );
+    const head = await requestOutput(
       client,
-      { ...input, extractText: segments[0] ?? "" },
+      { ...input, extractText: windows[0] ?? "" },
       formatVocabularyForPrompt(vocab),
       stages,
     );
+    const tails = windows.slice(1);
+    if (tails.length === 0 || !needCompileJson) {
+      output = head;
+      if (tails.length > 0 && stages.has("claims")) {
+        const extra = await requestMoreClaims(client, head.paper.title, tails);
+        output = { ...head, claims: [...head.claims, ...extra] };
+      }
+    } else {
+      const known = knownTitlesOf(head);
+      const vocabulary = formatVocabularyForPrompt(vocab);
+      const extras = await mapPool(tails, SEGMENT_COMPILE_CONCURRENCY, async (segment, offset) => {
+        const index = offset + 1;
+        options.onLog?.(`compile ${input.pdfFilename} segment ${index + 1}/${windows.length}`);
+        return requestSegmentOutput(
+          client,
+          {
+            paperTitle: head.paper.title,
+            segmentIndex: index,
+            segmentCount: windows.length,
+            extractText: segment,
+            knownTitles: known,
+            vocabulary,
+          },
+          stages,
+        );
+      });
+      output = mergeCompileOutput(head, extras);
+    }
   }
   let paper = output.paper;
   let published = resolvePublished(paper.published, input.pdfFilename, input.pdfCreationDate);
@@ -533,6 +625,27 @@ export async function compileExtract(
   // existing path), so legit cross-links between concepts of this same run
   // survive while invented directories (/paper/, /domains/) and phantom
   // targets are unlinked instead of hard-failing the compile.
+  const llmHits = (stages.has("concepts") || stages.has("pathways"))
+    ? await aliasAlignIncoming(
+        client,
+        vocab,
+        [
+          ...(stages.has("concepts")
+            ? [
+                ...output.topics.map((item) => ({ type: "Topic", title: item.title })),
+                ...output.methods.map((item) => ({ type: "Method", title: item.title })),
+                ...output.entities.map((item) => ({ type: "Entity", title: item.title })),
+                ...output.datasets.map((item) => ({ type: "Dataset", title: item.title })),
+              ]
+            : []),
+          ...(stages.has("pathways")
+            ? output.pathways.map((item) => ({ type: "Pathway", title: item.title }))
+            : []),
+        ],
+        { onLog: options.onLog },
+      )
+    : new Map<string, AlignEntry>();
+
   const upcoming = new Set<string>();
   const conceptGroups: Array<[CompileConcept[], string, string]> = [
     [output.topics, "topics", "Topic"],
@@ -545,7 +658,8 @@ export async function compileExtract(
   for (const [items, dir, type] of conceptGroups) {
     for (const item of items) {
       upcoming.add(`${dir}/${conceptSlug(item.title)}.md`);
-      const aligned = vocab.lookup(type, item.title);
+      const aligned = vocab.lookup(type, item.title)
+        ?? llmHits.get(normalizeAlignKey(item.title));
       if (aligned) {
         upcoming.add(aligned.path.replace(/^\/+/, "").replace(/\.md$/i, "") + ".md");
       }
@@ -564,22 +678,22 @@ export async function compileExtract(
 
   const emptyRelated = { paths: [] as string[], skipped: [] as string[], hrefs: [] as { title: string; href: string }[], rewrites: [] as { from: string; to: string }[] };
   const topics = stages.has("concepts")
-    ? await writeRelated(store, "topics", "Topic", output.topics, generated, paperHref, paper.title, vocab)
+    ? await writeRelated(store, "topics", "Topic", output.topics, generated, paperHref, paper.title, vocab, llmHits)
     : emptyRelated;
   const methods = stages.has("concepts")
-    ? await writeRelated(store, "methods", "Method", output.methods, generated, paperHref, paper.title, vocab)
+    ? await writeRelated(store, "methods", "Method", output.methods, generated, paperHref, paper.title, vocab, llmHits)
     : emptyRelated;
   const entities = stages.has("concepts")
-    ? await writeRelated(store, "entities", "Entity", output.entities, generated, paperHref, paper.title, vocab)
+    ? await writeRelated(store, "entities", "Entity", output.entities, generated, paperHref, paper.title, vocab, llmHits)
     : emptyRelated;
   const datasets = stages.has("concepts")
-    ? await writeRelated(store, "datasets", "Dataset", output.datasets, generated, paperHref, paper.title, vocab)
+    ? await writeRelated(store, "datasets", "Dataset", output.datasets, generated, paperHref, paper.title, vocab, llmHits)
     : emptyRelated;
   const genes = stages.has("genes")
     ? await writeRelated(store, "genes", "Gene", output.genes, generated, paperHref, paper.title, vocab)
     : emptyRelated;
   const pathways = stages.has("pathways")
-    ? await writeRelated(store, "pathways", "Pathway", output.pathways, generated, paperHref, paper.title, vocab)
+    ? await writeRelated(store, "pathways", "Pathway", output.pathways, generated, paperHref, paper.title, vocab, llmHits)
     : emptyRelated;
 
   let paperBody = existingPaper && !stages.has("digest") ? existingPaper.body : output.paper.body;
@@ -590,12 +704,21 @@ export async function compileExtract(
     paperBody = ensureLink(paperBody, link.title, link.href);
   }
 
-  const claimSeed = stages.has("claims") ? output.claims : [];
-  let moreClaims: CompileClaim[] = [];
-  if (cached?.kind !== "full" && stages.has("claims")) {
-    moreClaims = await requestMoreClaims(client, paper.title, segments.slice(1));
+  const hubWritten = [
+    ...topics.paths,
+    ...methods.paths,
+    ...entities.paths,
+    ...datasets.paths,
+    ...genes.paths,
+    ...pathways.paths,
+  ];
+  if (hubWritten.length > 0) {
+    const merges = await consolidateHubs(store, vocab, { onlyPaths: hubWritten, onLog: options.onLog });
+    paperBody = applyHubMergesToBody(paperBody, merges);
   }
-  const finalClaims = [...claimSeed, ...moreClaims];
+
+  const claimSeed = stages.has("claims") ? output.claims : [];
+  const finalClaims = claimSeed;
   if (cached?.kind !== "full") {
     // Persist the model output to the rebuildable cache so a later guard
     // failure resumes from the write phase instead of re-running the model.
@@ -617,7 +740,10 @@ export async function compileExtract(
         claims: finalClaims,
         generated,
       })
-    : { written: [] as string[], skipped: [] as string[], hrefs: [] as { title: string; href: string }[] };
+    : { written: [] as string[], skipped: [] as string[], omitted: 0, hrefs: [] as { title: string; href: string }[] };
+  if (claims.omitted > 0) {
+    options.onLog?.(`compile ${input.pdfFilename} dropped ${claims.omitted} unquoted claim(s)`);
+  }
   for (const link of claims.hrefs) {
     paperBody = ensureLink(paperBody, link.title, link.href);
   }

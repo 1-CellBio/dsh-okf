@@ -82,10 +82,11 @@ export async function writeClaims(
     claims: CompileClaim[];
     generated: { by: string; at: string };
   },
-): Promise<{ written: string[]; skipped: string[]; hrefs: { title: string; href: string }[] }> {
+): Promise<{ written: string[]; skipped: string[]; omitted: number; hrefs: { title: string; href: string }[] }> {
   const written: string[] = [];
   const skipped: string[] = [];
   const hrefs: { title: string; href: string }[] = [];
+  let omitted = 0;
   const paperId = paperConceptId(input.paperPath);
   const paperHref = `/${input.paperPath.replace(/^\/+/, "")}`;
   const extractId = input.extractPath ? paperConceptId(input.extractPath) : undefined;
@@ -102,8 +103,12 @@ export async function writeClaims(
     }
     const path = claimPathFor(input.paperPath, title);
     const snapped = snapQuoteToExtract(quote, input.extractText);
-    const storedQuote = snapped ?? quote;
-    const confidence: ClaimConfidence = snapped ? "extracted" : "disputed";
+    if (!snapped) {
+      omitted += 1;
+      return null;
+    }
+    const storedQuote = snapped;
+    const confidence: ClaimConfidence = "extracted";
 
     // Serialize read-check-write per claim path so concurrent compile jobs
     // cannot both see "not exists" and overwrite each other's claim.
@@ -127,7 +132,6 @@ export async function writeClaims(
         ...(input.doi ? { doi: input.doi } : {}),
         stance: asStance(claim.stance) ?? "reports",
         confidence,
-        ...(confidence === "disputed" ? { status: "draft" } : {}),
         evidence: {
           quote: storedQuote,
           ...(extractId ? { extract: extractId } : {}),
@@ -154,7 +158,7 @@ export async function writeClaims(
     }
   }
 
-  return { written, skipped, hrefs };
+  return { written, skipped, omitted, hrefs };
 }
 
 export async function listClaimsForPaper(

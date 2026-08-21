@@ -32,3 +32,15 @@ export type CompileOutput = {
   pathways: CompileConcept[];
   claims: CompileClaim[];
 };
+
+/** Continuation-pass payload (no bibliography). */
+export type CompileSegmentOutput = {
+  additions?: string;
+  topics: CompileConcept[];
+  methods: CompileConcept[];
+  entities: CompileConcept[];
+  datasets: CompileConcept[];
+  genes: CompileConcept[];
+  pathways: CompileConcept[];
+  claims: CompileClaim[];
+};

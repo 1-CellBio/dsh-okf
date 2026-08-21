@@ -52,7 +52,12 @@ export async function compileTargets(
   concurrency?: number,
 ): Promise<CompileBatchResult> {
   const targets = await listCompileTargets(store, paperPath);
-  const limit = paperPath ? 1 : parseConcurrency(concurrency == null ? undefined : String(concurrency), 2);
+  options.onLog?.(
+    targets.length === 0
+      ? "compile targets=0 (extracts/*.md listing empty)"
+      : `compile targets=${targets.length}${paperPath ? ` selector=${paperPath}` : ""}`,
+  );
+  const limit = paperPath ? 1 : parseConcurrency(concurrency == null ? undefined : String(concurrency), 3);
   // Load the alignment vocabulary once for the whole batch instead of once per
   // extract. Each compileExtract previously re-read every topics/methods/
   // entities page, making the full-library read O(extracts x concepts).
@@ -288,13 +293,20 @@ async function alreadyCompiled(
 }
 
 function missingExtractMessage(selector: string, targets: CompileTarget[]): string {
+  if (targets.length === 0) {
+    return (
+      `No extract bound to ${selector}: extracts/*.md listing is empty. ` +
+      `Ingest writes those files; okf_stats TextExtract count uses a full-tree list, ` +
+      `so a non-zero census with this error was a prefix-list bug (fixed). Retry okf_compile.`
+    );
+  }
   const unbound = targets.filter((target) => !target.paperPath).slice(0, 8);
   const listed = unbound
     .map((target) => `${target.extractPath} (PDF ${target.pdfFilename})`)
     .join("; ");
   const hint = listed
     ? ` Unbound extracts are named after the PDF until compile writes paper:: ${listed}.`
-    : " No extracts/*.md found.";
+    : " Pass extracts/<stem>.md, papers/<id>, or the source filename (foo.pdf).";
   return (
     `No extract bound to ${selector}. Pass extracts/*.md, a PDF stem, or omit paper to compile every extract.` +
     hint

@@ -4,6 +4,7 @@ import { utf8Decode } from "@/lib/fs/types";
 import { withPathLock } from "@/lib/fs/pathLock";
 import { mapPool } from "@/lib/pipeline/pool";
 import { okfCachePath } from "@/lib/okf/cache";
+import { COMPILE_SCHEMA_VERSION } from "./prompt";
 import { parseDocument } from "@/lib/okf/parse";
 import { serializeDocument } from "@/lib/okf/serialize";
 import { isHumanVerified } from "@/lib/okf/validate";
@@ -64,7 +65,7 @@ export type CompileCachePayload =
   | { kind: "claims"; claims: CompileClaim[] };
 
 export function compileOutputCacheKey(extractText: string): string {
-  return okfCachePath(`compile-${extractTextHash(extractText)}.json`);
+  return okfCachePath(`compile-v${COMPILE_SCHEMA_VERSION}-${extractTextHash(extractText)}.json`);
 }
 
 /** Short fingerprint of an extract's text, reused for the skip-compiled check. */

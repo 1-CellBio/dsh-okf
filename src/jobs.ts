@@ -3,20 +3,27 @@ import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { JobOutcome } from "@deepseek-ai/dsh-jobs";
 import type { ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { createBiblioClientFromEnv } from "@/lib/biblio/client";
+import { readBiblioFrontmatter } from "@/lib/biblio/apply";
 import { ALL_COMPILE_STAGES, OPTIONAL_COMPILE_STAGES, type CompileStage } from "@/lib/compile/run";
 import { compileTargets } from "@/lib/compile/fromStore";
 import { TextExtractor } from "@/lib/extractors/text";
-import { AnyDocEngine, isSupportedSource, supportedFormats } from "@/lib/doc/anydocEngine";
-import { runPipeline, type PdfInput, type VisionMode } from "@/lib/pipeline/run";
-import { VISION_PAUSE_DEFAULT } from "@/lib/extractors/visionGate";
+import { AnyDocEngine, supportedFormats } from "@/lib/doc/anydocEngine";
+import { expandSourcePaths } from "@/lib/pipeline/expandSources";
+import { INGEST_CONCURRENCY, runPipeline, type PdfInput, type VisionMode } from "@/lib/pipeline/run";
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import "./kinds";
 import { harnessChatClient, requireHarnessModel } from "./llm-client";
+import type { ChatClient } from "@/lib/providers/types";
 import { LineLog } from "./log-buffer";
-import { compileSurveyOp } from "./okf-ops";
-import { resolveHostPath, type PluginPaths } from "./paths";
+import { consolidateHubs } from "@/lib/compile/consolidate";
+import { aliasConsolidateHubs } from "@/lib/compile/aliasPass";
+import { pruneUnquotedClaims } from "@/lib/compile/pruneClaims";
+import { compileSurveyOp, invalidateBundleIndex, syncVectorsOp } from "./okf-ops";
+import { type PluginPaths } from "./paths";
 import { openSession } from "./session";
+import { asString, displayDoi } from "@/lib/okf/identity";
+import { parseDocument } from "@/lib/okf/parse";
+import { utf8Decode } from "@/lib/fs/types";
 
 export type IngestJobArgs = {
   pdfs: string[];
@@ -25,8 +32,10 @@ export type IngestJobArgs = {
   skipVision?: boolean;
   /** Vision policy: auto (default) | all | figures | skip | "pages:N,N,N". */
   vision?: string;
-  /** Pause budget for vision="auto". Default VISION_PAUSE_DEFAULT (12). */
+  /** Optional pause budget for vision="auto". Unset = transcribe every planned page. */
   visionMaxPages?: number;
+  /** Parallel documents (default 3). */
+  concurrency?: number;
 };
 
 export type CompileJobArgs = {
@@ -97,18 +106,20 @@ export async function runIngestJob(
     throw new Error("okf_ingest requires pdfs");
   }
   const session = openSession(paths.okfDir);
+  const expanded = await expandSourcePaths(pdfs, paths.pdfDir);
+  for (const warning of expanded.warnings) {
+    log.append(warning);
+  }
+  if (expanded.files.length === 0) {
+    throw new Error(
+      `okf_ingest: no supported documents under ${JSON.stringify(pdfs)} (supported: ${supportedFormats()})`,
+    );
+  }
   const inputs: PdfInput[] = [];
-  for (const raw of pdfs) {
-    const full = resolveHostPath(raw, paths.pdfDir);
-    const filename = path.basename(full);
-    if (!isSupportedSource(filename)) {
-      throw new Error(
-        `okf_ingest: unsupported format ${JSON.stringify(filename)} (supported: ${supportedFormats()})`,
-      );
-    }
-    log.append(`read ${full}`);
-    const bytes = new Uint8Array(await readFile(full));
-    inputs.push({ filename, bytes });
+  for (const file of expanded.files) {
+    log.append(`read ${file.full}`);
+    const bytes = new Uint8Array(await readFile(file.full));
+    inputs.push({ filename: file.filename, bytes });
   }
   const compile = args.compile !== false;
   const visionMode = parseVision(args.vision, args.skipVision);
@@ -121,18 +132,23 @@ export async function runIngestJob(
         },
       };
   const model = compile ? requireHarnessModel(ctx).model : "none";
-  log.append(`extract ${inputs.length} document(s) compile=${compile} vision=${describeVision(visionMode)} maxPages=${args.visionMaxPages ?? VISION_PAUSE_DEFAULT} engine=anydoc+pdfjs`);
+  const concurrency = args.concurrency ?? INGEST_CONCURRENCY;
+  log.append(
+    `extract ${inputs.length} document(s) compile=${compile} vision=${describeVision(visionMode)} maxPages=${args.visionMaxPages ?? "none"} concurrency=${concurrency} engine=anydoc+pdfjs`,
+  );
   const results = await runPipeline(session.store, inputs, {
     extractor: new TextExtractor(engine),
     client,
     model,
     compile,
-    vision: { mode: visionMode, maxPages: args.visionMaxPages ?? VISION_PAUSE_DEFAULT },
+    vision: { mode: visionMode, maxPages: args.visionMaxPages },
     raster: (pdf, page, opts) => engine.rasterPage(pdf, page, opts),
     biblio: createBiblioClientFromEnv(),
     onLog: (line) => log.append(line),
+    concurrency,
   });
   throwIfAborted(signal);
+  invalidateBundleIndex(session.store);
   for (const result of results) {
     log.append(`${result.path} ${result.status}${result.skipped ? " skipped" : ""}`);
   }
@@ -142,6 +158,8 @@ export async function runIngestJob(
       `${vision.length} document(s) still need vision (raster or multimodal complete failed). Check job_output; retry okf_ingest.`,
     );
   }
+  await finishHubsAndIndex(session.store, log, compile ? client : undefined);
+  await maybeSyncVectors(session.store, log);
   return `ingest ${results.length} document(s)`;
 }
 
@@ -157,18 +175,21 @@ export async function runCompileJob(
   const stages = parseStages(args.stages);
   const model = requireHarnessModel(ctx).model;
   log.append(`compile stages=${stages.join(",")} paper=${args.paper ?? "*"}`);
+  const compileClient = harnessChatClient(ctx, signal);
   const { results, failures } = await compileTargets(
     session.store,
-    harnessChatClient(ctx, signal),
+    compileClient,
     {
       model,
       stages,
       biblio: createBiblioClientFromEnv(),
+      onLog: (line) => log.append(line),
     },
     args.paper?.trim() || undefined,
     args.concurrency,
   );
   throwIfAborted(signal);
+  await finishHubsAndIndex(session.store, log, compileClient);
   const upToDate = results.filter((result) => result.alreadyCompiled).length;
   for (const result of results) {
     log.append(
@@ -180,6 +201,7 @@ export async function runCompileJob(
   for (const failure of failures) {
     log.append(`compile failed: ${failure.path}: ${failure.message}`);
   }
+  await maybeSyncVectors(session.store, log);
   return `compile ${results.length} extract(s)${upToDate > 0 ? ` (${upToDate} already up to date, skipped)` : ""}`;
 }
 
@@ -201,6 +223,7 @@ export async function runSurveyJob(
   };
   throwIfAborted(signal);
   log.append(`wrote ${result.path} cited=${result.cited.length} illegal=${result.illegal.length}`);
+  invalidateBundleIndex(session.store);
   return `survey ${result.path}`;
 }
 
@@ -251,4 +274,73 @@ function throwIfAborted(signal: AbortSignal): void {
     error.name = "AbortError";
     throw error;
   }
+}
+
+async function maybeSyncVectors(store: ReturnType<typeof openSession>["store"], log: LineLog): Promise<void> {
+  try {
+    const result = await syncVectorsOp(store);
+    log.append(`vectors model=${result.model} chunks=${result.chunks} changed=${result.changed}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/no embedding model/i.test(message)) {
+      return;
+    }
+    log.append(`vectors skipped: ${message}`);
+  }
+}
+
+async function finishHubsAndIndex(
+  store: ReturnType<typeof openSession>["store"],
+  log: LineLog,
+  client?: ChatClient,
+): Promise<void> {
+  const pruned = await pruneUnquotedClaims(store);
+  if (pruned.pruned > 0 || pruned.healed > 0) {
+    log.append(`claims prune dropped=${pruned.pruned} healed=${pruned.healed} kept=${pruned.kept}`);
+  }
+  const merges = await consolidateHubs(store, undefined, { onLog: (line) => log.append(line) });
+  if (merges.length > 0) {
+    log.append(`consolidated ${merges.length} hub pair(s)`);
+  }
+  if (client) {
+    const aliasMerges = await aliasConsolidateHubs(store, client, undefined, {
+      onLog: (line) => log.append(line),
+    });
+    if (aliasMerges.length > 0) {
+      log.append(`alias consolidated ${aliasMerges.length} hub pair(s)`);
+    }
+  }
+  await logBiblioGaps(store, log);
+  invalidateBundleIndex(store);
+}
+
+async function logBiblioGaps(
+  store: ReturnType<typeof openSession>["store"],
+  log: LineLog,
+): Promise<void> {
+  const paths = (await store.list("papers/")).filter((path) => path.endsWith(".md"));
+  let missingPublished = 0;
+  let missingDoi = 0;
+  let suggested = 0;
+  for (const path of paths) {
+    const { frontmatter } = parseDocument(utf8Decode(await store.read(path)));
+    if (asString(frontmatter.status) === "deprecated") {
+      continue;
+    }
+    if (!asString(frontmatter.published)) {
+      missingPublished += 1;
+    }
+    if (!displayDoi(frontmatter.doi)) {
+      missingDoi += 1;
+    }
+    if (readBiblioFrontmatter(frontmatter.biblio)?.status === "suggested") {
+      suggested += 1;
+    }
+  }
+  if (missingPublished === 0 && missingDoi === 0 && suggested === 0) {
+    return;
+  }
+  log.append(
+    `biblio gaps missing_published=${missingPublished} missing_doi=${missingDoi} low_confidence=${suggested} (open the review tab)`,
+  );
 }

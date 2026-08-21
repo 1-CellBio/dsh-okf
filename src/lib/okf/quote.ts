@@ -12,18 +12,19 @@ export type FoldedQuote = {
 const SKIP_PUNCT = /[.,;:()[\]"'“”‘’\u2026]/;
 
 export function foldQuote(source: string): FoldedQuote {
+  const text = source.normalize("NFKC");
   const textParts: string[] = [];
   const map: number[] = [];
   let lastSpace = true;
   let i = 0;
-  while (i < source.length) {
-    const c = source[i]!;
+  while (i < text.length) {
+    const c = text[i]!;
     if (c === "\u00AD") {
       i += 1;
       continue;
     }
-    if (c === "-" && i + 1 < source.length) {
-      const wrap = source.slice(i + 1).match(/^(\s+)([a-z])/);
+    if (c === "-" && i + 1 < text.length) {
+      const wrap = text.slice(i + 1).match(/^(\s+)([a-z])/);
       if (wrap) {
         i += 1 + wrap[1]!.length;
         continue;
@@ -109,14 +110,15 @@ function snapByWordAnchors(extract: string, q: FoldedQuote, e: FoldedQuote): str
 
 /** Verbatim extract span for an LLM quote, or undefined if it cannot be aligned. */
 export function snapQuoteToExtract(quote: string, extract: string): string | undefined {
+  const source = extract.normalize("NFKC");
   const q = foldQuote(quote);
-  const e = foldQuote(extract);
+  const e = foldQuote(source);
   if (!q.text || !e.text) {
     return undefined;
   }
   const at = e.text.indexOf(q.text);
   if (at !== -1) {
-    return origSlice(extract, e, at, at + q.text.length) || undefined;
+    return origSlice(source, e, at, at + q.text.length) || undefined;
   }
-  return snapByWordAnchors(extract, q, e);
+  return snapByWordAnchors(source, q, e);
 }

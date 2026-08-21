@@ -4,6 +4,8 @@ import { asString, asTags } from "@/lib/okf/identity";
 import { conceptPath, toConceptId } from "@/lib/okf/links";
 import { parseDocument } from "@/lib/okf/parse";
 import { conceptSlug } from "@/lib/okf/slug";
+import { parentheticals } from "./hubMatch";
+import { alignTokens, TOKEN_ALIGN_TYPES, tokenMatch } from "./tokens";
 
 export const ALIGN_DIRS = ["topics", "methods", "entities", "datasets", "genes", "pathways"] as const;
 
@@ -16,7 +18,7 @@ export type AlignEntry = {
 };
 
 export type AlignHit = AlignEntry & {
-  matchedBy: "title" | "alias" | "slug" | "stem";
+  matchedBy: "title" | "alias" | "slug" | "stem" | "token";
 };
 
 const STEM_MIN = 5;
@@ -45,6 +47,8 @@ function slugFromPath(path: string): string {
 
 export class AlignIndex {
   private readonly byType = new Map<string, Map<string, { entry: AlignEntry; kind: AlignHit["matchedBy"] }[]>>();
+  private readonly tokenSetsByPath = new Map<string, string[][]>();
+  private readonly tokenIndex = new Map<string, Map<string, AlignEntry[]>>();
 
   add(entry: AlignEntry): void {
     const bucket = this.byType.get(entry.type) ?? new Map<string, { entry: AlignEntry; kind: AlignHit["matchedBy"] }[]>();
@@ -59,6 +63,7 @@ export class AlignIndex {
         alias: 1,
         slug: 2,
         stem: 3,
+        token: 4,
       };
       const existing = list.find((item) => item.entry.path === entry.path);
       if (existing) {
@@ -84,13 +89,71 @@ export class AlignIndex {
     } else if (titleKey.length > STEM_MIN) {
       put(`c:${titleKey}s`, "stem");
     }
-    for (const alias of entry.aliases) {
+    for (const alias of [...entry.aliases, ...parentheticals(entry.title)]) {
       const aliasKey = normalizeAlignKey(alias);
       put(`c:${aliasKey}`, "alias");
       put(`s:${conceptSlug(alias)}`, "alias");
       const aliasStem = stemKey(aliasKey);
       if (aliasStem) {
         put(`c:${aliasStem}`, "stem");
+      }
+    }
+    this.indexTokens(entry);
+  }
+
+  remove(path: string): void {
+    this.tokenSetsByPath.delete(path);
+    for (const bucket of this.byType.values()) {
+      for (const [key, list] of [...bucket.entries()]) {
+        const next = list.filter((item) => item.entry.path !== path);
+        if (next.length === 0) {
+          bucket.delete(key);
+        } else {
+          bucket.set(key, next);
+        }
+      }
+    }
+    for (const byToken of this.tokenIndex.values()) {
+      for (const [token, list] of [...byToken.entries()]) {
+        const next = list.filter((item) => item.path !== path);
+        if (next.length === 0) {
+          byToken.delete(token);
+        } else {
+          byToken.set(token, next);
+        }
+      }
+    }
+  }
+
+  private indexTokens(entry: AlignEntry): void {
+    if (!TOKEN_ALIGN_TYPES.has(entry.type)) {
+      return;
+    }
+    const labels = [entry.title, ...entry.aliases, ...parentheticals(entry.title)];
+    const sets: string[][] = [];
+    const seenSet = new Set<string>();
+    for (const label of labels) {
+      const tokens = alignTokens(label);
+      if (tokens.length === 0) {
+        continue;
+      }
+      const key = tokens.join("\0");
+      if (seenSet.has(key)) {
+        continue;
+      }
+      seenSet.add(key);
+      sets.push(tokens);
+    }
+    this.tokenSetsByPath.set(entry.path, sets);
+    const byToken = this.tokenIndex.get(entry.type) ?? new Map<string, AlignEntry[]>();
+    this.tokenIndex.set(entry.type, byToken);
+    for (const tokens of sets) {
+      for (const token of tokens) {
+        const list = byToken.get(token) ?? [];
+        if (!list.some((item) => item.path === entry.path)) {
+          list.push(entry);
+          byToken.set(token, list);
+        }
       }
     }
   }
@@ -117,6 +180,7 @@ export class AlignIndex {
       alias: 1,
       slug: 2,
       stem: 3,
+      token: 4,
     };
     for (const probe of probes) {
       const list = bucket.get(probe.key);
@@ -131,7 +195,49 @@ export class AlignIndex {
         return { ...hit.entry, matchedBy: hit.kind };
       }
     }
-    return undefined;
+    return this.lookupToken(type, title);
+  }
+
+  private tokenHits(type: string, title: string): AlignEntry[] {
+    if (!TOKEN_ALIGN_TYPES.has(type)) {
+      return [];
+    }
+    const incoming = alignTokens(title);
+    if (incoming.length === 0) {
+      return [];
+    }
+    const byToken = this.tokenIndex.get(type);
+    if (!byToken) {
+      return [];
+    }
+    const seen = new Set<string>();
+    const hits: AlignEntry[] = [];
+    for (const token of incoming) {
+      for (const entry of byToken.get(token) ?? []) {
+        if (seen.has(entry.path)) {
+          continue;
+        }
+        seen.add(entry.path);
+        const sets = this.tokenSetsByPath.get(entry.path) ?? [alignTokens(entry.title)];
+        if (sets.some((existing) => tokenMatch(existing, incoming) || tokenMatch(incoming, existing))) {
+          hits.push(entry);
+        }
+      }
+    }
+    return hits;
+  }
+
+  private lookupToken(type: string, title: string): AlignHit | undefined {
+    let best: { entry: AlignEntry; score: number } | undefined;
+    const incoming = alignTokens(title);
+    for (const entry of this.tokenHits(type, title)) {
+      const sets = this.tokenSetsByPath.get(entry.path) ?? [alignTokens(entry.title)];
+      const score = Math.max(...sets.map((tokens) => tokens.length), incoming.length);
+      if (!best || score > best.score) {
+        best = { entry, score };
+      }
+    }
+    return best ? { ...best.entry, matchedBy: "token" } : undefined;
   }
 
   /** Every entry whose indexed keys collide with `title`'s lookup probes. */
@@ -168,6 +274,12 @@ export class AlignIndex {
         out.push(item.entry);
       }
     }
+    for (const hit of this.tokenHits(type, title)) {
+      if (!seen.has(hit.path)) {
+        seen.add(hit.path);
+        out.push(hit);
+      }
+    }
     return out;
   }
 
@@ -191,6 +303,28 @@ export class AlignIndex {
       }
     }
     return titles;
+  }
+
+  entriesByType(type: string, limit = 100): AlignEntry[] {
+    const bucket = this.byType.get(type);
+    if (!bucket) {
+      return [];
+    }
+    const seen = new Set<string>();
+    const out: AlignEntry[] = [];
+    for (const list of bucket.values()) {
+      for (const item of list) {
+        if (item.kind !== "title" || seen.has(item.entry.path)) {
+          continue;
+        }
+        seen.add(item.entry.path);
+        out.push(item.entry);
+        if (out.length >= limit) {
+          return out;
+        }
+      }
+    }
+    return out;
   }
 }
 

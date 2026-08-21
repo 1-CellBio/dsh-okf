@@ -1,4 +1,4 @@
-import type { CompileClaim, CompileConcept, CompileOutput, CompilePaper } from "./types";
+import type { CompileClaim, CompileConcept, CompileOutput, CompilePaper, CompileSegmentOutput } from "./types";
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
@@ -128,4 +128,23 @@ export function parseClaimsOnly(text: string): CompileClaim[] {
     throw new Error("claims output must be an object");
   }
   return parseClaimList((raw as Record<string, unknown>).claims, "claims");
+}
+
+export function parseSegmentOutput(text: string): CompileSegmentOutput {
+  const raw = extractJsonObject(text);
+  if (!raw || typeof raw !== "object") {
+    throw new Error("compile segment output must be an object");
+  }
+  const rec = raw as Record<string, unknown>;
+  const paper = rec.paper && typeof rec.paper === "object" ? (rec.paper as Record<string, unknown>) : undefined;
+  return {
+    additions: asString(rec.additions) ?? asString(paper?.body),
+    topics: parseList(rec.topics, "topics"),
+    methods: parseList(rec.methods, "methods"),
+    entities: parseList(rec.entities, "entities"),
+    datasets: parseList(rec.datasets, "datasets"),
+    genes: parseList(rec.genes, "genes"),
+    pathways: parseList(rec.pathways, "pathways"),
+    claims: parseClaimList(rec.claims, "claims"),
+  };
 }
